@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tank Turn Tactics</title>
+<link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box}
+body{margin:auto;max-width:1000px;padding:12px;font:16px 'Patrick Hand','Comic Sans MS',cursive;background:#1f3d2b;color:#f4efe0}
+h1{margin:4px 0}h3{margin:0 0 8px}
+button,input,select{font:inherit;padding:6px 12px;border-radius:10px;border:2px solid #0006;background:#efe6d2;color:#222}
+button{cursor:pointer;box-shadow:0 2px 0 #0005}
+.panel{background:#2b5239;border-radius:14px;padding:12px;margin:10px 0}
+.row{margin:8px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.ph{width:56px;height:56px;border:3px solid #000;background:#efe6d2 center/cover;color:#333;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:13px;text-align:center}
+.code{font-size:26px;letter-spacing:4px;background:#efe6d2;color:#222;padding:2px 12px;border-radius:10px}
+#bw{container-type:inline-size;width:min(100%,780px);margin:14px auto}
+#board{--u:calc(100cqw / var(--n));display:grid;gap:calc(var(--u)*.07);padding:calc(var(--u)*.07);background:#2f5a3e;border-radius:10px}
+.c{aspect-ratio:1;background:#7ba487;position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.c.r{background:#3d6b4c}.c:hover{filter:brightness(1.15)}
+.tk{width:78%;height:78%;border:calc(var(--u)*.05) solid #000;background:#efe6d2 center/cover;display:flex;align-items:center;justify-content:center;color:#222;font-size:calc(var(--u)*.4)}
+.tk.me{box-shadow:0 0 0 calc(var(--u)*.06) #4ade80}.tk.sel{box-shadow:0 0 0 calc(var(--u)*.06) #facc15}
+.lb{position:absolute;left:calc(100% - var(--u)*.08);top:50%;transform:translateY(-50%);background:#fff;color:#111;border-radius:30% 18% 34% 22%;padding:calc(var(--u)*.06) calc(var(--u)*.16);text-align:center;font-size:calc(var(--u)*.3);line-height:1.05;z-index:5;white-space:nowrap;pointer-events:none}
+.lb.l{left:auto;right:calc(100% - var(--u)*.08)}.lb small{display:block;font-size:.72em;opacity:.65}
+.hf{color:#f33}.he{color:#111}
+#cards{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin:16px 0}
+.card{width:112px;padding:10px 4px 6px;background:#efe6d2;border-radius:16px 10px 18px 9px;text-align:center;cursor:pointer;box-shadow:0 4px 0 #0006;user-select:none}
+.card.on{transform:translateY(-8px);outline:3px solid #facc15}.card.off{opacity:.4;cursor:default}
+.card i{font-style:normal;display:block;font-size:34px;line-height:1.1}.card b{display:block;font-size:20px}.card small{color:#555}
+#cols{display:flex;gap:14px;flex-wrap:wrap}#cols>div{flex:1 1 280px}
+.pl{display:flex;gap:8px;align-items:center;margin:4px 0;cursor:pointer}.pl .ph{width:30px;height:30px;cursor:pointer}.dead{opacity:.5}
+#log{font-size:14px;opacity:.85;max-height:170px;overflow:auto}#msg{color:#ffb4b4;min-height:1.3em}
+</style></head><body>
+<h1>Tank Turn Tactics</h1>
+<div id="demo" class="panel" hidden></div>
+<div id="bar"></div><div id="who"></div><div id="msg"></div><div id="app"></div>
+<details class="panel"><summary>Host controls</summary>
+<div class="row"><input id="ak" type="password" placeholder="Host key">
+ Board size <input id="sz" type="number" value="12" style="width:70px">
+ Minutes per round <input id="iv" type="number" value="720" style="width:80px"></div>
+<div class="row">Seconds between a player's actions (0 = no limit) <input id="cd2" type="number" min="0" value="0" style="width:80px"> <button onclick="host('config')">Apply to running game</button></div>
+<div class="row"><button onclick="host('reset')">New game (clears lobby)</button> <button onclick="host('start')">Start game</button></div>
+</details>
+<!--ENGINE-->
+<script>
+const DEMO = typeof TTEngine !== 'undefined';
+let S = null, last = '', sel = null, armed = 'move', pend = null, E = null, tok = '';
+try { tok = localStorage.ttc || ''; } catch {}
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function call(p, b = {}, quiet) {
+  let j;
+  if (E) { b.key = 'demo'; j = E.handle(p, b); }
+  else j = await (await fetch('/api/' + p, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(b)})).json();
+  if (!quiet) $('msg').textContent = j.error || '';
+  return j;
+}
+async function poll() {
+  const j = await call('state', {token: tok}, true), k = JSON.stringify(j, (key, v) => key === 'now' ? 0 : v);
+  S = j; S.got = Date.now(); if (k !== last) { last = k; draw(); }
+}
+const setTok = t => { tok = t; try { localStorage.ttc = t; } catch {} };
+const dist = (a, b) => { const w = (p, q) => { const d = Math.abs(p - q); return Math.min(d, S.size - d); }; return Math.max(w(a.x, b.x), w(a.y, b.y)); };
+const IMG = p => !p.pv ? '' : E ? E.photo(p.id) : `/photo/${p.id}?v=${p.pv}`;
+const bg = p => IMG(p) ? `background-image:url(${IMG(p)})` : '';
+function readPhoto(f) {
+  return new Promise((ok, no) => {
+    const fr = new FileReader();
+    fr.onerror = no;
+    fr.onload = () => {
+      const i = new Image(); i.onerror = no;
+      i.onload = () => {
+        const c = document.createElement('canvas'); c.width = c.height = 128; const s = Math.min(i.width, i.height);
+        c.getContext('2d').drawImage(i, (i.width - s) / 2, (i.height - s) / 2, s, s, 0, 0, 128, 128);
+        ok(c.toDataURL('image/jpeg', 0.8));
+      };
+      i.src = fr.result;
+    };
+    fr.readAsDataURL(f);
+  });
+}
+async function pick(el) {
+  if (!el.files[0]) return;
+  try { const d = await readPhoto(el.files[0]); if (S.me) { await call('photo', {token: tok, photo: d}); poll(); } else { pend = d; draw(); } }
+  catch { $('msg').textContent = 'Could not read that image'; }
+}
+async function join() {
+  const j = await call('join', {name: $('nm').value, photo: pend});
+  if (j.token) { setTok(j.token); pend = null; } poll();
+}
+async function login() { const j = await call('login', {code: $('cd').value}); if (j.token) setTok(j.token); poll(); }
+const logout = () => { setTok(''); poll(); };
+const host = cmd => call('admin', {key: $('ak').value, cmd, size: +$('sz').value, interval: +$('iv').value, cooldown: +$('cd2').value}).then(() => { sel = null; poll(); });
+const A = (type, o = {}) => call('act', {token: tok, type, ...o}).then(poll);
+const CARDS = [
+  ['move', 'Move', '✥', '#1f6f8b', 'move', '/square'], ['shoot', 'Attack', '⟶♥', '#b3191f', 'shoot', ''],
+  ['giveAP', 'Give AP', '●→○', '#1f7a2e', 'giveAP', ''], ['range', 'Extend range', '⤢', '#a37a00', 'range', ''],
+  ['heal', 'Heal', '✚', '#c2457a', 'heal', ''], ['giveHP', 'Give ♥', '♥→', '#c2457a', null, ''],
+];
+function K(k) { if (k === 'heal' || k === 'range') A(k); else { armed = k; draw(); } }
+function C(x, y) {
+  const me = S.players.find(p => p.id === S.me), p = S.players.find(q => q.alive && q.x === x && q.y === y);
+  if (p) {
+    sel = p.id;
+    if (me && S.phase === 'play') {
+      if (!me.alive) return A('vote', {target: p.id});
+      if (p !== me && ['shoot', 'giveAP', 'giveHP'].includes(armed)) return A(armed, {target: p.id});
+    }
+    draw();
+  } else if (me && me.alive && armed === 'move' && S.phase === 'play') A('move', {x, y});
+}
+function draw() {
+  const me = S.players.find(p => p.id === S.me), live = S.players.filter(p => p.alive), cfg = S.cfg;
+  const nmv = $('nm') ? $('nm').value : '', cdv = $('cd') ? $('cd').value : '';
+  $('who').innerHTML = me ? `<div class="panel row"><label class="ph" style="${bg(me)}" title="Change photo">${IMG(me) ? '' : '+'}<input type="file" accept="image/*" hidden onchange="pick(this)"></label>
+    <b>${esc(me.name)}</b> · your login code: <span class="code">${esc(tok.toUpperCase())}</span> <small>(save it - it gets you back in on any device)</small>
+    <button onclick="logout()">Log out</button></div>` : '';
+  let h = '';
+  if (!me) {
+    if (S.phase === 'lobby') h += `<div class="panel"><h3>Join the game</h3><div class="row">
+      <label class="ph" style="${pend ? 'background-image:url(' + pend + ')' : ''}">${pend ? '' : '+ photo'}<input type="file" accept="image/*" hidden onchange="pick(this)"></label>
+      <input id="nm" placeholder="Your name" maxlength="20" value="${esc(nmv)}"> <button onclick="join()">Join</button></div></div>`;
+    h += `<div class="panel"><h3>Already joined?</h3><div class="row"><input id="cd" placeholder="Login code" maxlength="6" value="${esc(cdv)}" style="text-transform:uppercase;width:130px"> <button onclick="login()">Log in</button></div></div>`;
+  }
+  if (S.phase === 'lobby') {
+    h += `<div class="panel"><h3>Lobby</h3><p>${S.size}×${S.size} world that wraps around its edges. New action point every ${S.interval} min. Waiting for the host to start.</p>` +
+      S.players.map(p => `<div class="pl"><span class="ph" style="${bg(p)}">${IMG(p) ? '' : esc(p.name[0])}</span>${esc(p.name)}</div>`).join('') + '</div>';
+  } else {
+    let cells = '';
+    for (let y = 0; y < S.size; y++) for (let x = 0; x < S.size; x++) {
+      const p = live.find(q => q.x === x && q.y === y), inr = me && me.alive && dist(me, {x, y}) <= me.range;
+      let tk = '';
+      if (p) {
+        const hearts = '<span class="hf">' + '♥'.repeat(p.hp) + '</span><span class="he">' + '♡'.repeat(cfg.maxHp - p.hp) + '</span>';
+        tk = `<div class="tk${p === me ? ' me' : ''}${p.id === sel ? ' sel' : ''}" style="${bg(p)}">${IMG(p) ? '' : esc(p.name[0])}</div>` +
+          `<div class="lb${x > S.size / 2 ? ' l' : ''}">${hearts}<br>${p.ap} AP<small>${esc(p.name)}</small></div>`;
+      }
+      cells += `<div class="c${inr ? ' r' : ''}" onclick="C(${x},${y})">${tk}</div>`;
+    }
+    h += `<div id="bw"><div id="board" style="--n:${S.size};grid-template-columns:repeat(${S.size},1fr)">${cells}</div></div>`;
+    if (me && S.phase === 'play') {
+      h += '<div id="cards">';
+      if (me.alive) for (const [k, n, ico, c, ck] of CARDS) {
+        const cost = k === 'giveHP' ? '1 ♥' : '-' + cfg.cost[k] + ' AP', can = k === 'giveHP' ? me.hp > 1 : me.ap >= cfg.cost[k];
+        h += `<div class="card${armed === k ? ' on' : ''}${can ? '' : ' off'}" onclick="K('${k}')"><i style="color:${c}">${ico}</i><b style="color:${c}">${n}</b><small>${cost}${k === 'move' ? '/square' : ''}</small></div>`;
+      } else h += `<div class="card on"><i>🗳</i><b>Jury vote</b><small>${me.votes} left - click a living tank</small></div>`;
+      h += '</div>';
+    }
+    h += `<div id="cols"><div class="panel"><h3>Players</h3>` + S.players.map(p =>
+      `<div class="pl ${p.alive ? '' : 'dead'}" onclick="sel='${p.id}';draw()"><span class="ph" style="${bg(p)}">${IMG(p) ? '' : esc(p.name[0])}</span>${esc(p.name)} ${p.alive ? p.hp + '♥ ' + p.ap + ' AP · range ' + p.range : '☠ jury'}</div>`).join('') +
+      `</div><div class="panel"><h3>Log</h3><div id="log">${S.log.map(esc).join('<br>')}</div></div></div>`;
+  }
+  $('app').innerHTML = h;
+  if (DEMO) {
+    $('demo').hidden = false;
+    $('demo').innerHTML = `<b>Demo mode</b> - runs only in this page, nothing is shared. <div class="row">Act as <select onchange="setTok(this.value);poll()"><option value="">(spectator)</option>` +
+      S.players.map(p => `<option value="${E.codeOf(p.id)}" ${p.id === S.me ? 'selected' : ''}>${esc(p.name)}</option>`).join('') +
+      `</select> <button onclick="E.skip();poll()">Skip to next round</button> <button onclick="location.reload()">Restart demo</button></div>`;
+  }
+}
+setInterval(() => {
+  if (!S) return; let t = '';
+  if (S.phase === 'play') {
+    const s = Math.max(0, Math.round((S.next - S.now - (Date.now() - S.got)) / 1000));
+    t = (S.cooldown ? `${S.cooldown}s cooldown between actions · ` : '') + `Next round in ${Math.floor(s / 3600)}h ${String(Math.floor(s % 3600 / 60)).padStart(2, '0')}m ${String(s % 60).padStart(2, '0')}s`;
+  } else if (S.phase === 'over') t = `Game over - winner: ${S.winner}`;
+  $('bar').textContent = t;
+}, 1000);
+if (DEMO) {
+  E = TTEngine.create({adminKey: 'demo'}); tok = '';
+  E.handle('admin', {key: 'demo', cmd: 'reset', size: 9, interval: 60});
+  const fl = [['#c8283c', '#fff', '#c8283c'], ['#ffe000', '#fff', '#c33', '#1d3fbf'], ['#7fd1f5', '#fff', '#c33'], ['#d22', '#fff', '#d22']];
+  ['Latvia', 'Comoros', 'Fiji', 'Peru'].forEach((n, i) => {
+    const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d');
+    fl[i].forEach((col, j) => { g.fillStyle = col; g.fillRect(0, j * 64 / fl[i].length, 64, 64 / fl[i].length + 1); });
+    E.handle('join', {name: n, photo: c.toDataURL('image/jpeg', 0.8)});
+  });
+}
+poll(); setInterval(poll, 3000);
+</script></body></html>
